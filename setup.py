@@ -11,7 +11,7 @@ setup(
     url='https://github.com/locuslab/lml',
     py_modules=['lml'],
     install_requires=[
-        'numpy>=1<2',
+        'numpy==1.24.4',
         'semantic_version',
     ]
 )
