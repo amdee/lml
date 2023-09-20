@@ -3,68 +3,57 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 
+# Unbatched LML_jax function
 @jax.custom_vjp
 def LML_jax(x, N, eps, n_iter, branch=None, verbose=0):
     y, res = lml_forward(x, N, eps, n_iter, branch, verbose)
     return y, res
 
 def lml_forward(x, N, eps, n_iter, branch, verbose):
-    branch = branch if branch is not None else (10 if x.device().platform == 'cpu' else 100)
-
-    single = x.ndim == 1
-    if single:
-        x = jnp.expand_dims(x, 0)
+    branch = branch if branch is not None else 10 if jax.devices()[0].platform == 'cpu' else 100
+    # branch = branch if branch is not None else 10 if x.devices().platform == 'cpu' else 100
     
-    n_batch, nx = x.shape
+    nx = x.shape[0]
     if nx <= N:
-        return jnp.ones((n_batch, nx), dtype=x.dtype), None
+        return jnp.ones(nx, dtype=x.dtype), None
     
-    x_sorted = jnp.sort(x, axis=1)[:, ::-1]
-    nu_lower = -x_sorted[:, N-1] - 7.
-    nu_upper = -x_sorted[:, N] + 7.
+    x_sorted = jnp.sort(x)[::-1]
+    nu_lower = -x_sorted[N-1] - 7.
+    nu_upper = -x_sorted[N] + 7.
 
     ls = jnp.linspace(0, 1, branch)
 
     for _ in range(n_iter):
         r = nu_upper - nu_lower
-        I = r > eps
-
-        if not jnp.any(I):
-            break
-
-        Ix = jnp.where(I)[0]
-
-        nus = r[Ix][:, None] * ls + nu_lower[Ix][:, None]
-        _xs = x[Ix][:, None, :] + nus[:, :, None]
+        nus = r * ls + nu_lower
+        _xs = x[None, :] + nus[:, None]
         fs = jnp.sum(jax.nn.sigmoid(_xs), axis=-1) - N
 
-        i_lower = jnp.sum(fs < 0, axis=-1) - 1
+        i_lower = jnp.sum(fs < 0) - 1
         i_lower = jnp.where(i_lower < 0, 0, i_lower)
-
         i_upper = i_lower + 1
 
-        nu_lower = jnp.where(I, jnp.take_along_axis(nus, i_lower[:, None], axis=1).squeeze(), nu_lower)
-        nu_upper = jnp.where(I, jnp.take_along_axis(nus, i_upper[:, None], axis=1).squeeze(), nu_upper)
+        nu_lower = nus[i_lower]
+        nu_upper = nus[i_upper]
 
     nu = nu_lower + r / 2.
-    y = jax.nn.sigmoid(x + nu[:, None])
+    y = jax.nn.sigmoid(x + nu)
 
     return y, (y, nu, x, N)
 
+
 def lml_backward(res, grad_output):
     y, nu, x, N = res
-
     if y is None:
         return (jnp.zeros_like(x), None, None, None, None, None)
 
     Hinv = 1. / (1. / y + 1. / (1. - y))
-    dnu = jnp.sum(Hinv * grad_output, axis=1) / jnp.sum(Hinv, axis=1)
-    dx = -Hinv * (-grad_output + dnu[:, None])
+    dnu = jnp.sum(Hinv * grad_output) / jnp.sum(Hinv)
+    dx = -Hinv * (-grad_output + dnu)
 
     return (dx, None, None, None, None, None)
 
 LML_jax.defvjp(lml_forward, lml_backward)
-
 
 class LML(nn.Module):
     N: int = 1
@@ -75,17 +64,9 @@ class LML(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        """This function is called when you use the syntax y = model(x) and returns a tupple (y, res)
-
-        Args:
-            x (jax.numpy.ndarray): Input array of shape (batch_size, n_features
-
-        Returns:
-            (y, res) tupple: y is the output of the LML function and res is a tuple of (y, nu, x, N)
-        """
         return LML_jax(x, N=self.N, eps=self.eps, n_iter=self.n_iter, branch=self.branch, verbose=self.verbose)
-    
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     import numpy as np
     import cvxpy as cp
     import numdifftools as nd
@@ -109,45 +90,64 @@ if __name__ == "__main__":
     obj = cp.Minimize(-x * y - cp.sum(cp.entr(y)) - cp.sum(cp.entr(1. - y)))
     cons = [0 <= y, y <= 1, cp.sum(y) == n]
     prob = cp.Problem(obj, cons)
-    prob.solve(cp.SCS, verbose=True)
+    prob.solve(cp.SCS, verbose=True)    # print(f"value of y vyo_unbatched: {vyo_unbatched}\n\ngradient of y dy0 vyo_unbatched: {dyo_unbatched}")
+    # print(f"value of y vyo_batched: {vyo_batched}\n\ngradient of y dy0 vyo_batched: {dyo_batched}") 
     assert 'optimal' in prob.status
     y_cp = y.value
 
-    # Assuming that LML is a flax.linen module in your codebase
+    # Assuming that LML is a flax.linen module
+    x_jax_unbatched = jnp.array(x)
+    x_jax_batched = jnp.stack([x_jax_unbatched, x_jax_unbatched])
     x = jnp.stack([x, x])
     model = LML(N=n)
     key1, key2 = jax.random.split(jax.random.PRNGKey(1))
     dumy_input = jax.random.normal(key1, (n,m)) # Dummy input
     params = model.init(jax.random.PRNGKey(0), dumy_input)
     LML_state = model.bind(params)
-    y, _ = LML_state(x)
+    lml = lambda x_input: LML_state(x_input)[0] # for single instance
 
-    # Check almost equality
-    y_jax_check = np.array(y, copy=False)
-    # print(f'y_jax[0] = {y_jax_check[0]}\ny_cp = {y_cp}')
-    np.testing.assert_almost_equal(y_jax_check[0], y_cp, decimal=3)
-    print("Test 1: passed!")
+    # calculating the forward pass for unbatched and batched inputs
+    y_unbatched = lml(x_jax_unbatched)
+    y_batched = jax.vmap(lml)(x_jax_batched)
+    
+    # Check almost equality for single inputs
+    y_unbatched_check = np.array(y_unbatched, copy=False)
+    np.testing.assert_almost_equal(y_unbatched_check, y_cp, decimal=3)
+    print("Test 1 Unbatched : passed!")
+
+    # Check almost equality for batched inputs
+    y_batched_check = np.array(y_batched, copy=False)
+    np.testing.assert_almost_equal(y_batched_check[0], y_cp, decimal=3)
+    print("Test 2 batched : passed!")
 
     # Compute the gradient using JAX
-    # vy0, dy0 = jax.value_and_grad(lambda X: model.apply(params, X)[0, 0])(x) # below implememtaion is equivalent to this line
+    # below function similar to lml but returns only the value of y amd for sanity check
     def func_4jax_gradient(x_input):
-        return LML_state(x_input)[0, 0]
+        return LML_state(x_input)[0]
     
     def f(X_input):
         y, _ = LML_state(jnp.array(X_input))
         return np.array(y)
 
-    vy0, dy0 = jax.value_and_grad(func_4jax_gradient)(x)
+    vy0, dy0 = jax.value_and_grad(func_4jax_gradient)(x_jax_unbatched)
     # print(f"value of y vy0: {vy0}\n\ngradient of y dy0: {dy0}")
 
-    # Compute the gradient using numdifftools
-    x_ = np.array(x[0])
-    df = nd.Jacobian(f)
-    dy0_fd = df(x_)[0]
-    
-    np.testing.assert_almost_equal(np.array(dy0[0]), dy0_fd[0], decimal=3)
-    print(f"Test 2: Passed!")
+    vyo_unbatched, dyo_unbatched = jax.value_and_grad(lml)(x_jax_unbatched)
+    vyo_batched, dyo_batched = jax.vmap(jax.value_and_grad(lml))(x_jax_batched)
+    # print(f"value of y vyo_unbatched: {vyo_unbatched}\n\ngradient of y dy0 vyo_unbatched: {dyo_unbatched}")
+    # print(f"value of y vyo_batched: {vyo_batched}\n\ngradient of y dy0 vyo_batched: {dyo_batched}") 
 
+    # # Compute the gradient using numdifftools
+    x_ = np.array(x[0])
+    df_unbatched = nd.Jacobian(f)
+    df_fd_unbatched = df_unbatched(x_)
+
+    # np.testing.assert_almost_equal(np.array(dy0[0]), dy0_fd[0], decimal=3)
+    np.testing.assert_almost_equal(np.array(dy0), df_fd_unbatched[0], decimal=3)
+    np.testing.assert_almost_equal(np.array(dyo_unbatched), df_fd_unbatched[0], decimal=3)
+    np.testing.assert_almost_equal(np.array(dyo_batched[0]), df_fd_unbatched[0], decimal=3)
+    print(f"Test 3: Passed!")    # print(f"value of y vyo_unbatched: {vyo_unbatched}\n\ngradient of y dy0 vyo_unbatched: {dyo_unbatched}")
+    # print(f"value of y vyo_batched: {vyo_batched}\n\ngradient of y dy0 vyo_batched: {dyo_batched}") 
 
 ##########Test Again with torch implimentation to see same result##############
     # import torch
