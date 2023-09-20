@@ -84,15 +84,9 @@ class LML(nn.Module):
             (y, res) tupple: y is the output of the LML function and res is a tuple of (y, nu, x, N)
         """
         return LML_jax(x, N=self.N, eps=self.eps, n_iter=self.n_iter, branch=self.branch, verbose=self.verbose)
-
-
+    
 if __name__ == "__main__":
     import numpy as np
-    import jax.numpy as jnp
-    import numpy.random as npr
-    import jax
-    from jax import grad
-    from flax import linen as nn  # Assuming LML is defined here
     import cvxpy as cp
     import numdifftools as nd
 
@@ -100,18 +94,15 @@ if __name__ == "__main__":
     import sys
     from IPython.core import ultratb
 
-    sys.excepthook = ultratb.FormattedTB(
-        mode='Verbose', color_scheme='Linux', call_pdb=1
-    )
+    sys.excepthook = ultratb.FormattedTB(mode='Verbose', color_scheme='Linux', call_pdb=1)
 
     # Constants
     m = 10
     n = 2
-    batch_size = 2
 
     # Seed and data
-    npr.seed(0)
-    x = npr.random(m)
+    np.random.seed(0)
+    x = np.random.random(m)
 
     # CVXPY
     y = cp.Variable(m)
@@ -123,40 +114,39 @@ if __name__ == "__main__":
     y_cp = y.value
 
     # Assuming that LML is a flax.linen module in your codebase
+    x = jnp.stack([x, x])
     model = LML(N=n)
     key1, key2 = jax.random.split(jax.random.PRNGKey(1))
-    dumy_input = jax.random.normal(key1, (batch_size, m)) # Dummy input
+    dumy_input = jax.random.normal(key1, (n,m)) # Dummy input
     params = model.init(jax.random.PRNGKey(0), dumy_input)
-
-    # Using JAX and Flax's LML
-    x = jnp.stack([x, x])
-    LML_state = model.bind(params)  # Use this if you want to use the syntax y = model(x)
-    y_jax, _ = LML_state(x)
+    LML_state = model.bind(params)
+    y, _ = LML_state(x)
 
     # Check almost equality
-    y_jax_check = np.array(y_jax, copy=False)
-    print(f'y_jax[0] = {y_jax_check[0]}\ny_cp = {y_cp}')
+    y_jax_check = np.array(y, copy=False)
+    # print(f'y_jax[0] = {y_jax_check[0]}\ny_cp = {y_cp}')
     np.testing.assert_almost_equal(y_jax_check[0], y_cp, decimal=3)
-    print("Test passed!")
+    print("Test 1: passed!")
 
-    # # Compute the gradient using JAX
-    f = lambda X: LML_state(X)  # This reyurns a tuple (y, res)
-    dy0, grad_dy0= jax.value_and_grad(f, argnums=0)(x)    
-    # # dy0 = jnp.squeeze(dy0)
-    print(f"dy0 = {dy0}, \n\ngrad_dyo = {grad_dy0}")
+    # Compute the gradient using JAX
+    # vy0, dy0 = jax.value_and_grad(lambda X: model.apply(params, X)[0, 0])(x) # below implememtaion is equivalent to this line
+    def func_4jax_gradient(x_input):
+        return LML_state(x_input)[0, 0]
+    
+    def f(X_input):
+        y, _ = LML_state(jnp.array(X_input))
+        return np.array(y)
 
-    # Function for numdifftools
-    def func(x):
-        y, _ = LML_state(jnp.array(x))
-        return np.array(y[0])
+    vy0, dy0 = jax.value_and_grad(func_4jax_gradient)(x)
+    # print(f"value of y vy0: {vy0}\n\ngradient of y dy0: {dy0}")
 
-    # # Numerical gradient
-    df = nd.Jacobian(func)
-    dy0_fd = df(x)[0]
-    print(f"dy0_fd = {dy0_fd}")
-
-    # Test again
-    np.testing.assert_almost_equal(dy0, dy0_fd, decimal=3)
+    # Compute the gradient using numdifftools
+    x_ = np.array(x[0])
+    df = nd.Jacobian(f)
+    dy0_fd = df(x_)[0]
+    
+    np.testing.assert_almost_equal(np.array(dy0[0]), dy0_fd[0], decimal=3)
+    print(f"Test 2: Passed!")
 
 
 ##########Test Again with torch implimentation to see same result##############
