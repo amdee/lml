@@ -3,31 +3,40 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 
+
 # Unbatched LML_jax function
 @jax.custom_vjp
 def LML_jax(x, N, eps, n_iter, branch=None, verbose=0):
     y, res = lml_forward(x, N, eps, n_iter, branch, verbose)
     return y, res
 
+
 def lml_forward(x, N, eps, n_iter, branch, verbose):
     branch = branch if branch is not None else 10 if jax.devices()[0].platform == 'cpu' else 100
-    # branch = branch if branch is not None else 10 if x.devices().platform == 'cpu' else 100
-    
+
     nx = x.shape[0]
     if nx <= N:
         return jnp.ones(nx, dtype=x.dtype), None
-    
+
     x_sorted = jnp.sort(x)[::-1]
     nu_lower = -x_sorted[N-1] - 7.
     nu_upper = -x_sorted[N] + 7.
 
     ls = jnp.linspace(0, 1, branch)
 
+    @jax.jit
+    def calculate_fs_single(nu, x, N):
+        _xs = x + nu
+        return jnp.sum(jax.nn.sigmoid(_xs)) - N
+
+    # Vectorize the helper function
+    calculate_fs_vectorized = jax.vmap(calculate_fs_single, in_axes=(0, None, None))
+
+    # Replace the loop body with a single call to the vectorized function
     for _ in range(n_iter):
         r = nu_upper - nu_lower
         nus = r * ls + nu_lower
-        _xs = x[None, :] + nus[:, None]
-        fs = jnp.sum(jax.nn.sigmoid(_xs), axis=-1) - N
+        fs = calculate_fs_vectorized(nus, x, N)
 
         i_lower = jnp.sum(fs < 0) - 1
         i_lower = jnp.where(i_lower < 0, 0, i_lower)
@@ -36,12 +45,13 @@ def lml_forward(x, N, eps, n_iter, branch, verbose):
         nu_lower = nus[i_lower]
         nu_upper = nus[i_upper]
 
+
     nu = nu_lower + r / 2.
     y = jax.nn.sigmoid(x + nu)
 
     return y, (y, nu, x, N)
 
-
+@jax.jit
 def lml_backward(res, grad_output):
     y, nu, x, N = res
     if y is None:
