@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
-
+from functools import partial
 
 # Unbatched LML_jax function
 @jax.custom_vjp
@@ -10,7 +10,7 @@ def LML_jax(x, N, eps, n_iter, branch=None, verbose=0):
     y, res = lml_forward(x, N, eps, n_iter, branch, verbose)
     return y, res
 
-
+@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5))
 def lml_forward(x, N, eps, n_iter, branch, verbose):
     branch = branch if branch is not None else 10 if jax.devices()[0].platform == 'cpu' else 100
 
